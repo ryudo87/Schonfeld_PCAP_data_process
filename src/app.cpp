@@ -33,11 +33,38 @@ bool loadVenueMetadata(const std::string& jsonPath, AppState& state) {
         std::string symbol = inst.value("exchSymbol", "");
         if (symbol.empty()) continue;
 
-        state.targetInstruments[symbol] = {
-            symbol,
-            inst.value("tickSizeTable", 1),
-            inst.value("unitOfTrading", 100)
-        };
+        // Parse tick size (structure may vary between integer, array or object)
+        int tickSize = 1;
+        if (inst.contains("tickSizeTable")) {
+            try {
+                const auto& t = inst["tickSizeTable"];
+                if (t.is_number_integer()) tickSize = t.get<int>();
+                else if (t.is_array() && !t.empty()) {
+                    if (t[0].is_number_integer()) tickSize = t[0].get<int>();
+                    else if (t[0].is_object()) tickSize = t[0].value("tickSize", t[0].value("tick", 1));
+                } else if (t.is_object()) {
+                    tickSize = t.value("tickSize", t.value("tick", 1));
+                }
+            } catch (...) {
+                tickSize = 1;
+            }
+        }
+
+        // Parse lot size (unitOfTrading may be string or integer)
+        int lotSize = 100;
+        if (inst.contains("unitOfTrading")) {
+            try {
+                const auto& u = inst["unitOfTrading"];
+                if (u.is_number_integer()) lotSize = u.get<int>();
+                else if (u.is_string()) {
+                    lotSize = std::stoi(u.get<std::string>());
+                }
+            } catch (...) {
+                lotSize = 100;
+            }
+        }
+
+        state.targetInstruments[symbol] = { symbol, tickSize, lotSize };
         state.orderBooks.emplace(symbol, OrderBook());
     }
 
@@ -263,18 +290,37 @@ bool processPcap(const std::string& pcapFile, AppState& state) {
     int result = 0;
 
     while ((result = pcap_next_ex(handle, &header, &packet)) >= 0) {
+        // Basic safety checks to avoid reading past captured packet buffer
+        if (header == nullptr || packet == nullptr) continue;
+        if (header->caplen < static_cast<bpf_u_int32>(sizeof(struct ether_header))) continue;
+
         struct ether_header* ethHeader = (struct ether_header*)packet;
         if (ntohs(ethHeader->ether_type) != ETHERTYPE_IP) continue;
+
+        // Ensure there is enough data for a minimal IP header
+        const size_t minIpOffset = sizeof(struct ether_header) + 20; // minimal IP header size
+        if (header->caplen < static_cast<bpf_u_int32>(minIpOffset)) continue;
 
         struct ip* ipHeader = (struct ip*)(packet + sizeof(struct ether_header));
         if (ipHeader->ip_p != IPPROTO_UDP) continue;
 
         int ipHeaderLen = ipHeader->ip_hl * 4;
+        if (ipHeaderLen < 20) continue;
+
+        // Ensure UDP header is present in captured data
+        size_t udpHeaderOffset = sizeof(struct ether_header) + ipHeaderLen;
+        if (header->caplen < static_cast<bpf_u_int32>(udpHeaderOffset + sizeof(struct udphdr))) continue;
+
         struct udphdr* udpHeader = (struct udphdr*)((u_char*)ipHeader + ipHeaderLen);
 
-        int udpHeaderLen = 8;
-        const u_char* payload = (u_char*)udpHeader + udpHeaderLen;
-        int payloadLen = ntohs(udpHeader->uh_ulen) - udpHeaderLen;
+        int udpLen = ntohs(udpHeader->uh_ulen);
+        if (udpLen <= static_cast<int>(sizeof(struct udphdr))) continue;
+
+        // Ensure full UDP payload is captured
+        if (header->caplen < static_cast<bpf_u_int32>(udpHeaderOffset + udpLen)) continue;
+
+        const u_char* payload = (u_char*)udpHeader + sizeof(struct udphdr);
+        int payloadLen = udpLen - static_cast<int>(sizeof(struct udphdr));
 
         processTSEPayload(payload, payloadLen, state);
     }
