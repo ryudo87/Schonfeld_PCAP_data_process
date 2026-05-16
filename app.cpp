@@ -56,11 +56,6 @@ static uint32_t readUint32(const u_char* data) {
            static_cast<uint32_t>(data[3]);
 }
 
-static uint64_t readUint64(const u_char* data) {
-    return (static_cast<uint64_t>(readUint32(data)) << 32) |
-           static_cast<uint64_t>(readUint32(data + 4));
-}
-
 static std::string extractInstrumentSymbol(const u_char* data, int len) {
     if (len < 10) return {};
     std::string symbol(reinterpret_cast<const char*>(data + 5), 5);
@@ -114,35 +109,37 @@ void parseTSEFlexMessage(const u_char* data, int len, AppState& state) {
     auto bookIt = state.orderBooks.find(symbol);
     if (bookIt == state.orderBooks.end()) return;
 
-    int offset = 26;
-    while (offset + 1 < len) {
-        uint8_t blockLen = data[offset];
-        if (blockLen == 0 || offset + 1 + blockLen > len) {
-            break;
-        }
+    // TLV parsing: use pointer iteration for safety and clarity
+    const u_char* ptr = data + 26;
+    const u_char* end = data + len;
 
-        char tag = static_cast<char>(data[offset + 1]);
-        const u_char* value = data + offset + 2;
-        int valueLen = blockLen - 1;
+    while (ptr + 1 < end) {
+        uint8_t blockLen = *ptr; // total length including tag + value
+        if (blockLen == 0) break;
+        const u_char* next = ptr + 1 + blockLen;
+        if (next > end) break; // malformed/partial
+
+        char tag = static_cast<char>(*(ptr + 1));
+        const u_char* value = ptr + 2;
+        int valueLen = static_cast<int>(blockLen) - 1; // tag consumes 1 byte
 
         switch (tag) {
-            case 'A':
+            case 'A': // Add
                 processAddEvent(value, valueLen, bookIt->second);
                 break;
-            case 'D':
+            case 'D': // Delete/Reduce
+            case 'E': // Execute/Reduce-like
                 processReduceEvent(value, valueLen, bookIt->second);
                 break;
-            case 'C':
+            case 'C': // Modify
                 processModifyEvent(value, valueLen, bookIt->second);
                 break;
-            case 'E':
-                processReduceEvent(value, valueLen, bookIt->second);
-                break;
             default:
+                // Unknown tag: ignore
                 break;
         }
 
-        offset += 1 + blockLen;
+        ptr = next;
     }
 }
 

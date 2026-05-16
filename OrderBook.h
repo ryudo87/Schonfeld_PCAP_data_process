@@ -54,19 +54,30 @@ public:
             return;
         }
 
-        auto& levels = (it->second.side == 'B') ? buyLevels : sellLevels;
         uint64_t price = it->second.price;
-
-        if (levels.count(price)) {
-            uint64_t currentLevelQty = levels[price];
-            if (currentLevelQty >= oldQty) {
-                levels[price] = currentLevelQty - oldQty + newQty;
-            } else {
-                levels[price] = newQty;
+        if (it->second.side == 'B') {
+            if (buyLevels.count(price)) {
+                uint64_t currentLevelQty = buyLevels[price];
+                if (currentLevelQty >= oldQty) {
+                    buyLevels[price] = currentLevelQty - oldQty + newQty;
+                } else {
+                    buyLevels[price] = newQty;
+                }
+                if (buyLevels[price] == 0) {
+                    buyLevels.erase(price);
+                }
             }
-
-            if (levels[price] == 0) {
-                levels.erase(price);
+        } else {
+            if (sellLevels.count(price)) {
+                uint64_t currentLevelQty = sellLevels[price];
+                if (currentLevelQty >= oldQty) {
+                    sellLevels[price] = currentLevelQty - oldQty + newQty;
+                } else {
+                    sellLevels[price] = newQty;
+                }
+                if (sellLevels[price] == 0) {
+                    sellLevels.erase(price);
+                }
             }
         }
 
@@ -99,33 +110,46 @@ public:
         
         uint64_t bestPrice = 0;
         uint64_t maxVolume = 0;
+        // Collect all unique price levels in ascending order
+        std::vector<uint64_t> prices;
+        prices.reserve(buyLevels.size() + sellLevels.size());
+        for (const auto& [p, _] : buyLevels) prices.push_back(p);
+        for (const auto& [p, _] : sellLevels) prices.push_back(p);
+        std::sort(prices.begin(), prices.end());
+        prices.erase(std::unique(prices.begin(), prices.end()), prices.end());
 
-        // Collect all price levels from both sides
-        std::set<uint64_t> allPrices;
-        for (const auto& [price, _] : buyLevels) allPrices.insert(price);
-        for (const auto& [price, _] : sellLevels) allPrices.insert(price);
+        size_t n = prices.size();
+        if (n == 0) return {0, 0};
 
-        // For each potential price, calculate cumulative volumes
-        for (uint64_t price : allPrices) {
-            // Cumulative buy: sum of all buy orders at or above this price
-            uint64_t cumBuy = 0;
-            for (auto it = buyLevels.begin(); it != buyLevels.end(); ++it) {
-                if (it->first >= price) {
-                    cumBuy += it->second;
-                } else {
-                    break;
-                }
-            }
+        // Map price -> index
+        std::unordered_map<uint64_t, size_t> idxMap;
+        idxMap.reserve(n * 2);
+        for (size_t i = 0; i < n; ++i) idxMap[prices[i]] = i;
 
-            // Cumulative sell: sum of all sell orders at or below this price
-            uint64_t cumSell = 0;
-            for (auto it = sellLevels.begin(); it != sellLevels.end(); ++it) {
-                if (it->first <= price) {
-                    cumSell += it->second;
-                }
-            }
+        // Build arrays of quantities at each price index
+        std::vector<uint64_t> buyQty(n, 0), sellQty(n, 0);
+        for (const auto& [p, q] : buyLevels) {
+            auto it = idxMap.find(p);
+            if (it != idxMap.end()) buyQty[it->second] = q;
+        }
+        for (const auto& [p, q] : sellLevels) {
+            auto it = idxMap.find(p);
+            if (it != idxMap.end()) sellQty[it->second] = q;
+        }
 
-            uint64_t executableVol = std::min(cumBuy, cumSell);
+        // Compute suffix sums for buys (>= price) and prefix sums for sells (<= price)
+        std::vector<uint64_t> buyCum(n, 0), sellCum(n, 0);
+        for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
+            buyCum[i] = buyQty[i] + (i + 1 < static_cast<int>(n) ? buyCum[i + 1] : 0);
+        }
+        for (size_t i = 0; i < n; ++i) {
+            sellCum[i] = sellQty[i] + (i > 0 ? sellCum[i - 1] : 0);
+        }
+
+        // Evaluate executable volume at each candidate price
+        for (size_t i = 0; i < n; ++i) {
+            uint64_t executableVol = std::min(buyCum[i], sellCum[i]);
+            uint64_t price = prices[i];
             if (executableVol > maxVolume || (executableVol == maxVolume && price > bestPrice)) {
                 maxVolume = executableVol;
                 bestPrice = price;
