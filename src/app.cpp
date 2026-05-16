@@ -45,126 +45,203 @@ bool loadVenueMetadata(const std::string& jsonPath, AppState& state) {
     return true;
 }
 
-static uint16_t readUint16(const u_char* data) {
-    return static_cast<uint16_t>(data[0]) << 8 | static_cast<uint16_t>(data[1]);
-}
-
-static uint32_t readUint32(const u_char* data) {
-    return static_cast<uint32_t>(data[0]) << 24 |
-           static_cast<uint32_t>(data[1]) << 16 |
-           static_cast<uint32_t>(data[2]) << 8 |
+// Big-endian binary reading helpers
+static uint32_t readUint32BE(const u_char* data) {
+    return (static_cast<uint32_t>(data[0]) << 24) |
+           (static_cast<uint32_t>(data[1]) << 16) |
+           (static_cast<uint32_t>(data[2]) << 8) |
            static_cast<uint32_t>(data[3]);
 }
 
-static std::string extractInstrumentSymbol(const u_char* data, int len) {
-    if (len < 10) return {};
-    std::string symbol(reinterpret_cast<const char*>(data + 5), 5);
-    while (!symbol.empty() && symbol.back() == ' ') {
-        symbol.pop_back();
+static uint64_t readUint64BE(const u_char* data) {
+    return (static_cast<uint64_t>(data[0]) << 56) |
+           (static_cast<uint64_t>(data[1]) << 48) |
+           (static_cast<uint64_t>(data[2]) << 40) |
+           (static_cast<uint64_t>(data[3]) << 32) |
+           (static_cast<uint64_t>(data[4]) << 24) |
+           (static_cast<uint64_t>(data[5]) << 16) |
+           (static_cast<uint64_t>(data[6]) << 8) |
+           static_cast<uint64_t>(data[7]);
+}
+
+
+
+// TSE FLEX Full MBO Protocol Tag Handlers
+
+// A tag: Add Order (26 bytes)
+// Offset 0: Message Type ('A')
+// Offset 1-4: Time (Microseconds)
+// Offset 5-8: Order ID (4 bytes)
+// Offset 9: Side ('B' or 'S')
+// Offset 10-15: Quantity (6 bytes)
+// Offset 16-23: Price (8 bytes, last 4 digits are decimal)
+// Offset 24: Order Condition
+// Offset 25: Modification Flag
+static void processATag(const u_char* data, int len, const std::string& issueCode, AppState& state) {
+    if (len != 26) return;
+
+    auto bookIt = state.orderBooks.find(issueCode);
+    if (bookIt == state.orderBooks.end()) return;
+
+    uint32_t orderId = readUint32BE(data + 5);
+    char side = static_cast<char>(data[9]);
+    
+    // Quantity is 6 bytes big-endian
+    uint64_t quantity = 0;
+    for (int i = 0; i < 6; ++i) {
+        quantity = (quantity << 8) | data[10 + i];
     }
-    return symbol;
-}
+    
+    // Price is 8 bytes, last 4 digits are decimal fractions
+    uint64_t price = readUint64BE(data + 16);
 
-// Read a 3-byte big-endian unsigned integer
-static uint32_t readUint24(const u_char* data) {
-    return (static_cast<uint32_t>(data[0]) << 16) |
-           (static_cast<uint32_t>(data[1]) << 8) |
-           static_cast<uint32_t>(data[2]);
-}
-
-static void processEventBlock(const u_char* block, int blockLen, OrderBook& book) {
-    if (blockLen < 16) return;
-
-    // Event block structure (16 bytes):
-    // 0-2: Signature (0x54 0x67 0x29)
-    // 3: Action type
-    // 4-7: Order ID (big-endian uint32)
-    // 8-11: Price (big-endian uint32)
-    // 12-14: Quantity (big-endian uint24)
-    // 15: Side (0x42='B', 0x53='S')
-
-    uint8_t actionType = block[3];
-    uint64_t orderId = readUint32(block + 4);
-    uint64_t price = readUint32(block + 8);
-    uint64_t qty = readUint24(block + 12);
-    char side = static_cast<char>(block[15]);
-
-    // Validate
-    if (qty == 0 || (side != 'B' && side != 'S')) {
+    if (quantity == 0 || (side != 'B' && side != 'S')) {
         return;
     }
 
-    // For now, treat most events as Add to the order book.
-    // This allows us to build up the full order book state for IAP calculation.
-    // The primary concern is distinguishing between adding/updating orders vs. deleting.
-    // Most observed action types appear to represent order additions/modifications.
+    // Skip market orders (max 64-bit value indicates market order)
+    const uint64_t MARKET_ORDER_PRICE = 0xFFFFFFFFFFFFFFFFULL;
+    if (price == MARKET_ORDER_PRICE) {
+        return;
+    }
+
+    bookIt->second.addOrder(orderId, side, price, quantity);
+}
+
+// D tag: Order Delete (11 bytes)
+// Offset 0: Message Type ('D')
+// Offset 1-4: Time (Microseconds)
+// Offset 5-8: Order ID (4 bytes)
+// Offset 9: Side ('B' or 'S')
+// Offset 10: Modification Flag
+static void processDTag(const u_char* data, int len, const std::string& issueCode, AppState& state) {
+    if (len != 11) return;
+
+    auto bookIt = state.orderBooks.find(issueCode);
+    if (bookIt == state.orderBooks.end()) return;
+
+    uint32_t orderId = readUint32BE(data + 5);
+    bookIt->second.deleteOrder(orderId);
+}
+
+// E tag: Order Executed (Zaraba) (20 bytes)
+// Offset 0: Message Type ('E')
+// Offset 1-4: Time (Microseconds)
+// Offset 5-8: Order ID
+// Offset 9: Side
+// Offset 10-15: Quantity executed (6 bytes)
+// ... additional fields
+static void processETag(const u_char* data, int len, const std::string& issueCode, AppState& state) {
+    if (len != 20) return;
+
+    auto bookIt = state.orderBooks.find(issueCode);
+    if (bookIt == state.orderBooks.end()) return;
+
+    uint32_t orderId = readUint32BE(data + 5);
     
-    switch (actionType) {
-        case 0x51: // 'Q' - Likely Modify or standard operation
-        case 0x52: // 'R' - Most common, likely Add
-        case 0x54: // 'T' - Possibly normal operation
-        case 0x55: // 'U' - Possibly normal operation
-        case 0x56: // 'V' - Possibly normal operation
-        case 0x57: // 'W' - Possibly normal operation
-        case 0x58: // 'X' - Possibly normal operation
-        case 0x59: // 'Y' - Possibly normal operation
-        case 0x5A: // 'Z' - Possibly normal operation
-        case 0x5B: // '[' - Possibly normal operation
-        case 0x5E: // '^' - Possibly normal operation
-        case 0x5F: // '_' - Possibly normal operation
-            // Treat as Add: accumulate orders at this price level
-            book.addOrder(orderId, side, price, qty);
-            break;
-        case 0x53: // 'S' - Possibly Delete or Strike
-            // For now, also treat as Add since we need price overlap for IAP
-            book.addOrder(orderId, side, price, qty);
-            break;
-        default:
-            // Unknown action type - skip
-            break;
+    // Quantity is 6 bytes starting at offset 10
+    uint64_t quantity = 0;
+    for (int i = 0; i < 6; ++i) {
+        quantity = (quantity << 8) | data[10 + i];
+    }
+
+    if (quantity > 0) {
+        bookIt->second.reduceOrder(orderId, quantity);
+    }
+}
+
+// C tag: Order Executed with Price (Itayose) (29 bytes)
+// Similar structure to E tag with additional pricing information
+static void processCTag(const u_char* data, int len, const std::string& issueCode, AppState& state) {
+    if (len != 29) return;
+
+    auto bookIt = state.orderBooks.find(issueCode);
+    if (bookIt == state.orderBooks.end()) return;
+
+    uint32_t orderId = readUint32BE(data + 5);
+    
+    // Quantity is 6 bytes starting at offset 10
+    uint64_t quantity = 0;
+    for (int i = 0; i < 6; ++i) {
+        quantity = (quantity << 8) | data[10 + i];
+    }
+
+    if (quantity > 0) {
+        bookIt->second.reduceOrder(orderId, quantity);
     }
 }
 
 void parseTSEFlexMessage(const u_char* data, int len, AppState& state) {
-    // TSE Flex Full MBO message structure:
-    // 0-3: Header (0x33, then 3 zero bytes)
-    // 4: Sequence/Message counter
-    // 5-9: Symbol (5 ASCII bytes, may be space-padded)
-    // 10-17: Padding/spaces
-    // 18-20: Zeros
-    // 21: Length indicator
-    // 22-24: Zeros
-    // 25: Event count (number of 16-byte blocks)
-    // 26: Reserved
-    // 27+: Event blocks (16 bytes each)
+    // TSE FLEX Full MBO packet structure:
+    // Packet Header: 26 bytes
+    //   Offset 0: Multicast Group Number (1 byte)
+    //   Offset 1: Number of System Reboots (1 byte)
+    //   Offset 2-5: Sequence Number (4 bytes)
+    //   Offset 6-17: Issue Code (12 bytes, left-aligned ASCII)
+    //   Offset 18-21: Update Number (4 bytes)
+    //   Offset 22: Packet Number (1 byte)
+    //   Offset 23: Total Number of Packets (1 byte)
+    //   Offset 24: Utility Flag (1 byte)
+    //   Offset 25: Message Count (1 byte) - number of tags
+    // Then: Variable-length tags, each with [1-byte tag length] + [tag data]
 
-    if (len < 28) return; // Need at least up to offset 27
+    if (len < 26) return;
 
-    std::string symbol = extractInstrumentSymbol(data, len);
-    if (symbol.empty()) return;
+    // Extract Issue Code from packet header (offset 6-17, 12 bytes, left-aligned)
+    std::string issueCode(reinterpret_cast<const char*>(data + 6), 12);
+    // Trim trailing spaces and null bytes
+    while (!issueCode.empty() && (issueCode.back() == ' ' || issueCode.back() == '\0')) {
+        issueCode.pop_back();
+    }
+    
+    if (issueCode.empty()) return;
 
-    auto bookIt = state.orderBooks.find(symbol);
+    auto bookIt = state.orderBooks.find(issueCode);
     if (bookIt == state.orderBooks.end()) return;
 
-    // Extract event count at offset 25
-    uint8_t eventCount = data[25];
-    if (eventCount == 0) return;
+    uint8_t messageCount = data[25];
+    
+    // Parse tags starting at offset 26
+    int tagOffset = 26;
+    for (uint8_t i = 0; i < messageCount; ++i) {
+        if (tagOffset >= len) break;
 
-    // Process event blocks starting at offset 27
-    const u_char* eventStart = data + 27;
-    const u_char* end = data + len;
+        uint8_t tagLength = data[tagOffset];
+        ++tagOffset;
 
-    for (uint8_t i = 0; i < eventCount; ++i) {
-        const u_char* blockPtr = eventStart + (i * 16);
-        if (blockPtr + 16 > end) break; // Not enough data for this block
+        if (tagOffset + tagLength > len) break;
 
-        // Verify signature bytes (0x54 0x67 0x29 = 'Tg)')
-        if (blockPtr[0] != 0x54 || blockPtr[1] != 0x67 || blockPtr[2] != 0x29) {
-            // Signature mismatch - stop processing this message
-            break;
+        const u_char* tagData = data + tagOffset;
+        char tagType = static_cast<char>(tagData[0]);
+
+        // Route to appropriate tag handler
+        switch (tagType) {
+            case 'A':
+                processATag(tagData, tagLength, issueCode, state);
+                break;
+            case 'D':
+                processDTag(tagData, tagLength, issueCode, state);
+                break;
+            case 'E':
+                processETag(tagData, tagLength, issueCode, state);
+                break;
+            case 'C':
+                processCTag(tagData, tagLength, issueCode, state);
+                break;
+            case 'T':
+            case 'O':
+            case 'K':
+            case 'R':
+            case 'L':
+                // These tags don't affect the order book state for MBO
+                // (Timestamp, Trading Status, Execution Summary, Reset, Communication Control)
+                break;
+            default:
+                // Unknown tag type - skip
+                break;
         }
 
-        processEventBlock(blockPtr, 16, bookIt->second);
+        tagOffset += tagLength;
     }
 }
 

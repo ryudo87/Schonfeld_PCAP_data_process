@@ -174,53 +174,103 @@ static bool testGenerateCsvReport() {
 
 static bool testParseTSEFlexMessage() {
     AppState state;
-    state.orderBooks["12345"] = OrderBook();
+    state.orderBooks["TEST"] = OrderBook();
 
-    std::vector<u_char> payload(27 + 2 * 16, 0);
-    payload[0] = 0x33;
-    payload[5] = '1';
-    payload[6] = '2';
-    payload[7] = '3';
-    payload[8] = '4';
-    payload[9] = '5';
-    payload[25] = 2; // two event blocks
+    // Create a proper TSE FLEX Full MBO packet:
+    // 26-byte header + variable-length tags
+    
+    // First, create the packet header (26 bytes)
+    std::vector<u_char> packet(100, 0);
+    int offset = 0;
+    
+    packet[offset++] = 0x01;  // Multicast Group Number
+    packet[offset++] = 0x00;  // Number of System Reboots
+    packet[offset++] = 0x00;  // Sequence Number (4 bytes)
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x01;
+    
+    // Issue Code (12 bytes, left-aligned): "TEST"
+    std::string issueCode = "TEST";
+    std::copy(issueCode.begin(), issueCode.end(), packet.begin() + offset);
+    offset += 12;  // Offset is now 18
+    
+    packet[offset++] = 0x00;  // Update Number (4 bytes)
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x01;
+    
+    packet[offset++] = 0x00;  // Packet Number
+    packet[offset++] = 0x00;  // Total Number of Packets
+    packet[offset++] = 0x00;  // Utility Flag
+    packet[offset++] = 0x02;  // Message Count = 2 tags
 
-    auto writeUint32 = [&](int offset, uint32_t value) {
-        payload[offset + 0] = static_cast<u_char>((value >> 24) & 0xFF);
-        payload[offset + 1] = static_cast<u_char>((value >> 16) & 0xFF);
-        payload[offset + 2] = static_cast<u_char>((value >> 8) & 0xFF);
-        payload[offset + 3] = static_cast<u_char>(value & 0xFF);
-    };
+    // Now offset is 26, start adding tags
+    // Tag 1: A tag (Add Order, Buy side, 10 shares at price 1000)
+    packet[offset++] = 26;  // A tag length
+    packet[offset++] = 'A';  // Message Type
+    packet[offset++] = 0x00;  // Time (Microseconds) - 4 bytes
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x01;
+    packet[offset++] = 0x00;  // Order ID (4 bytes) = 1
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x01;
+    packet[offset++] = 'B';  // Side = Buy
+    // Quantity (6 bytes) = 10
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x0A;
+    // Price (8 bytes) = 1000
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x03;
+    packet[offset++] = 0xE8;
+    packet[offset++] = 0x00;  // Order Condition
+    packet[offset++] = 0x00;  // Modification Flag
+    
+    // Tag 2: A tag (Add Order, Sell side, 5 shares at price 1000)
+    packet[offset++] = 26;  // A tag length
+    packet[offset++] = 'A';  // Message Type
+    packet[offset++] = 0x00;  // Time (Microseconds) - 4 bytes
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x02;
+    packet[offset++] = 0x00;  // Order ID (4 bytes) = 2
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x02;
+    packet[offset++] = 'S';  // Side = Sell
+    // Quantity (6 bytes) = 5
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x05;
+    // Price (8 bytes) = 1000
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x03;
+    packet[offset++] = 0xE8;
+    packet[offset++] = 0x00;  // Order Condition
+    packet[offset++] = 0x00;  // Modification Flag
 
-    auto writeUint24 = [&](int offset, uint32_t value) {
-        payload[offset + 0] = static_cast<u_char>((value >> 16) & 0xFF);
-        payload[offset + 1] = static_cast<u_char>((value >> 8) & 0xFF);
-        payload[offset + 2] = static_cast<u_char>(value & 0xFF);
-    };
+    parseTSEFlexMessage(packet.data(), offset, state);
 
-    int block1 = 27;
-    payload[block1 + 0] = 0x54;
-    payload[block1 + 1] = 0x67;
-    payload[block1 + 2] = 0x29;
-    payload[block1 + 3] = 0x52;
-    writeUint32(block1 + 4, 1);
-    writeUint32(block1 + 8, 1000);
-    writeUint24(block1 + 12, 10);
-    payload[block1 + 15] = 'B';
-
-    int block2 = 27 + 16;
-    payload[block2 + 0] = 0x54;
-    payload[block2 + 1] = 0x67;
-    payload[block2 + 2] = 0x29;
-    payload[block2 + 3] = 0x52;
-    writeUint32(block2 + 4, 2);
-    writeUint32(block2 + 8, 1000);
-    writeUint24(block2 + 12, 5);
-    payload[block2 + 15] = 'S';
-
-    parseTSEFlexMessage(payload.data(), static_cast<int>(payload.size()), state);
-
-    auto [iap, iav] = state.orderBooks["12345"].calculateIAP();
+    auto [iap, iav] = state.orderBooks["TEST"].calculateIAP();
     ASSERT_EQ(iap, static_cast<uint64_t>(1000));
     ASSERT_EQ(iav, static_cast<uint64_t>(5));
     return true;
