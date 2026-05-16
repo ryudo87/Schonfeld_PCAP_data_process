@@ -172,6 +172,60 @@ static bool testGenerateCsvReport() {
     return true;
 }
 
+static bool testParseTSEFlexMessage() {
+    AppState state;
+    state.orderBooks["12345"] = OrderBook();
+
+    std::vector<u_char> payload(27 + 2 * 16, 0);
+    payload[0] = 0x33;
+    payload[5] = '1';
+    payload[6] = '2';
+    payload[7] = '3';
+    payload[8] = '4';
+    payload[9] = '5';
+    payload[25] = 2; // two event blocks
+
+    auto writeUint32 = [&](int offset, uint32_t value) {
+        payload[offset + 0] = static_cast<u_char>((value >> 24) & 0xFF);
+        payload[offset + 1] = static_cast<u_char>((value >> 16) & 0xFF);
+        payload[offset + 2] = static_cast<u_char>((value >> 8) & 0xFF);
+        payload[offset + 3] = static_cast<u_char>(value & 0xFF);
+    };
+
+    auto writeUint24 = [&](int offset, uint32_t value) {
+        payload[offset + 0] = static_cast<u_char>((value >> 16) & 0xFF);
+        payload[offset + 1] = static_cast<u_char>((value >> 8) & 0xFF);
+        payload[offset + 2] = static_cast<u_char>(value & 0xFF);
+    };
+
+    int block1 = 27;
+    payload[block1 + 0] = 0x54;
+    payload[block1 + 1] = 0x67;
+    payload[block1 + 2] = 0x29;
+    payload[block1 + 3] = 0x52;
+    writeUint32(block1 + 4, 1);
+    writeUint32(block1 + 8, 1000);
+    writeUint24(block1 + 12, 10);
+    payload[block1 + 15] = 'B';
+
+    int block2 = 27 + 16;
+    payload[block2 + 0] = 0x54;
+    payload[block2 + 1] = 0x67;
+    payload[block2 + 2] = 0x29;
+    payload[block2 + 3] = 0x52;
+    writeUint32(block2 + 4, 2);
+    writeUint32(block2 + 8, 1000);
+    writeUint24(block2 + 12, 5);
+    payload[block2 + 15] = 'S';
+
+    parseTSEFlexMessage(payload.data(), static_cast<int>(payload.size()), state);
+
+    auto [iap, iav] = state.orderBooks["12345"].calculateIAP();
+    ASSERT_EQ(iap, static_cast<uint64_t>(1000));
+    ASSERT_EQ(iav, static_cast<uint64_t>(5));
+    return true;
+}
+
 int main() {
     struct TestCase { const char* name; bool (*func)(); } tests[] = {
         {"OrderBook calculateIAP", testOrderBookCalculateIAP},
@@ -180,6 +234,7 @@ int main() {
         {"parseArguments missing json", testParseArgumentsMissingJson},
         {"loadVenueMetadata", testLoadVenueMetadata},
         {"generateCsvReport", testGenerateCsvReport}
+        ,{"parseTSEFlexMessage", testParseTSEFlexMessage}
     };
 
     for (const auto& test : tests) {
