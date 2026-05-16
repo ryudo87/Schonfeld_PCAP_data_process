@@ -41,6 +41,19 @@ make -j4
 
 The compiled executable will be at `./build/tse_mbo_processor`
 
+## 4.1. How to Run the Unit Tests
+
+```bash
+cd build
+ctest --output-on-failure
+```
+
+Or run the test executable directly:
+
+```bash
+./build/tse_mbo_tests
+```
+
 ## 5. How to Run the Program
 
 ```bash

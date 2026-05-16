@@ -18,19 +18,22 @@ if(NOT nlohmann_json_FOUND)
     message(STATUS "nlohmann_json not found via find_package, will try system headers")
 endif()
 
-# Add the executable
-add_executable(tse_mbo_processor main.cpp app.cpp)
+enable_testing()
 
-# Link libraries
-target_link_libraries(tse_mbo_processor PRIVATE ${LIBPCAP_LIBRARIES})
-
-# For nlohmann/json
+# Shared library for reuse in the main program and tests
+add_library(tse_mbo_lib STATIC src/app.cpp)
+target_include_directories(tse_mbo_lib PUBLIC ${CMAKE_SOURCE_DIR}/src)
 if(nlohmann_json_FOUND)
-    target_link_libraries(tse_mbo_processor PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(tse_mbo_lib PRIVATE nlohmann_json::nlohmann_json)
 else()
-    # System header fallback
-    target_include_directories(tse_mbo_processor PRIVATE /usr/include)
+    target_include_directories(tse_mbo_lib PRIVATE /usr/include)
 endif()
+target_link_libraries(tse_mbo_lib PRIVATE ${LIBPCAP_LIBRARIES})
+
+add_executable(tse_mbo_processor src/main.cpp)
+target_link_libraries(tse_mbo_processor PRIVATE tse_mbo_lib)
+
+add_subdirectory(tests)
 
 # Installation
 install(TARGETS tse_mbo_processor DESTINATION bin)
