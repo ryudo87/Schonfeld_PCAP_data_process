@@ -33,13 +33,11 @@ sudo apt-get install build-essential cmake libpcap-dev nlohmann-json3-dev
 ## 4. How to Compile
 
 ```bash
-mkdir build
-cd build
-cmake ..
-make -j4
+cmake -S . -B build
+cmake --build build -- -j$(nproc)
 ```
 
-The compiled executable will be at `./build/tse_mbo_processor`
+The compiled executables will be in `build/`, including `build/tse_mbo_processor` and `build/tse_mbo_tests`
 
 ## 4.1. How to Run the Unit Tests
 
@@ -51,17 +49,20 @@ ctest --output-on-failure
 Or run the test executable directly:
 
 ```bash
-./build/tse_mbo_tests
+./tse_mbo_tests
 ```
 
 ## 5. How to Run the Program
 
 ```bash
-./build/tse_mbo_processor \
-    --json TseVenue.20241105.json \
-    --pcaps 20241105_051.test.pcap 20241105_052.test.pcap \
-    --out output.csv
+cd build
+./tse_mbo_processor \
+    --json ../TseVenue.20241105.json \
+    --pcaps ../PCAP/20241105_051.test.pcap ../PCAP/20241105_052.test.pcap \
+    --out ../output.csv
 ```
+
+This generates `output.csv` in the repository root.
 
 ### Command-line Arguments:
 - `--json <file>`: Path to the venue metadata JSON file (required)
