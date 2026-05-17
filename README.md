@@ -1,12 +1,7 @@
 # TSE FLEX Full MBO PCAP Processor
 
 ## AI Model Usage Disclosure
-This project was completed with assistance from **GitHub Copilot (Claude Haiku 4.5)**. The AI model was used to:
-- Implement the TSE FLEX protocol parser
-- Design and optimize the order book data structure
-- Create the IAP (Indicative Auction Price) calculation algorithm
-- Generate build configurations and project structure
-- Debug compilation and runtime issues
+This project was completed with assistance from **Claude Haiku 4.5**. 
 
 ## 1. Operating System and Version
 * **OS:** Ubuntu 24.04.4 LTS (Noble Numbat)
